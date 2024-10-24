@@ -17,7 +17,7 @@ def get_host_ip():
 # path
 DATA_DIR = {
 	'CMUMOSI': '../dataset/CMUMOSI',   # for nlpr
-	'CMUMOSEI': '..dataset/CMUMOSEI',# for nlpr
+	'CMUMOSEI': '../dataset/CMUMOSEI',# for nlpr
 	'IEMOCAPSix': '../dataset/IEMOCAP', # for nlpr
 	'IEMOCAPFour': '../dataset/IEMOCAP', # for nlpr
 }
