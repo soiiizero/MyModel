@@ -16,10 +16,10 @@ from torch.nn.utils.rnn import pad_sequence
 ## gain name2features [only one speaker]
 ## videoLabels: from [-3, 3], type=float
 def read_data(label_path, feature_root):
-
     ## gain (names, speakers)
     names = []
-    videoIDs, videoLabels, _, videoSentences, trainVids, valVids, testVids = pickle.load(open(label_path, "rb"), encoding='latin1')
+    videoIDs, videoLabels, _, videoSentences, trainVids, valVids, testVids = pickle.load(open(label_path, "rb"),
+                                                                                         encoding='latin1')
     for ii, vid in enumerate(videoIDs):
         uids_video = videoIDs[vid]
         names.extend(uids_video)
@@ -29,11 +29,11 @@ def read_data(label_path, feature_root):
     feature_dim = -1
     for ii, name in enumerate(names):
         feature = []
-        feature_path = os.path.join(feature_root, name+'.npy')
+        feature_path = os.path.join(feature_root, name + '.npy')
         feature_dir = os.path.join(feature_root, name)
         if os.path.exists(feature_path):
             single_feature = np.load(feature_path)
-            single_feature = single_feature.squeeze() # [Dim, ] or [Time, Dim]
+            single_feature = single_feature.squeeze()  # [Dim, ] or [Time, Dim]
             feature.append(single_feature)
             feature_dim = max(feature_dim, single_feature.shape[-1])
         # else: ## exists dir, faces
@@ -45,13 +45,13 @@ def read_data(label_path, feature_root):
         # sequeeze features
         single_feature = np.array(feature).squeeze()
         if len(single_feature) == 0:
-            single_feature = np.zeros((feature_dim, ))
+            single_feature = np.zeros((feature_dim,))
         elif len(single_feature.shape) == 2:
             single_feature = np.mean(single_feature, axis=0)
         features.append(single_feature)
 
     ## save (names, features)
-    print (f'Input feature {os.path.basename(feature_root)} ===> dim is {feature_dim}; No. sample is {len(names)}')
+    print(f'Input feature {os.path.basename(feature_root)} ===> dim is {feature_dim}; No. sample is {len(names)}')
     assert len(names) == len(features), f'Error: len(names) != len(features)'
     name2feats = {}
     for ii in range(len(names)):
@@ -84,7 +84,8 @@ class CMUMOSIDataset(Dataset):
         # self.videoVisualGuest = {}
         self.videoLabelsNew = {}
         # self.videoSpeakersNew = {}
-        self.videoIDs, self.videoLabels, _, self.videoSentences, self.trainVids, self.valVids, self.testVids = pickle.load(open(label_path, "rb"), encoding='latin1')
+        self.videoIDs, self.videoLabels, _, self.videoSentences, self.trainVids, self.valVids, self.testVids = pickle.load(
+            open(label_path, "rb"), encoding='latin1')
 
         self.vids = []
         for vid in sorted(self.trainVids): self.vids.append(vid)
@@ -124,36 +125,37 @@ class CMUMOSIDataset(Dataset):
             self.videoLabelsNew[vid] = np.array(self.videoLabelsNew[vid])
             # self.videoSpeakersNew[vid] = np.array(self.videoSpeakersNew[vid])
 
-
     ## return host(A, T, V) and guest(A, T, V)
     def __getitem__(self, index):
         vid = self.vids[index]
-        return torch.FloatTensor(self.videoAudioHost[vid]),\
-               torch.FloatTensor(self.videoTextHost[vid]),\
-               torch.FloatTensor(self.videoVisualHost[vid]),\
-               torch.FloatTensor(self.videoLabelsNew[vid]),\
-               vid
-
+        return torch.FloatTensor(self.videoAudioHost[vid]), \
+            torch.FloatTensor(self.videoTextHost[vid]), \
+            torch.FloatTensor(self.videoVisualHost[vid]), \
+            torch.FloatTensor(self.videoLabelsNew[vid]), \
+            vid
 
     def __len__(self):
         return len(self.vids)
 
     def get_featDim(self):
-        print (f'audio dimension: {self.adim}; text dimension: {self.tdim}; video dimension: {self.vdim}')
+        print(f'audio dimension: {self.adim}; text dimension: {self.tdim}; video dimension: {self.vdim}')
         return self.adim, self.tdim, self.vdim
 
     def get_maxSeqLen(self):
-        print (f'max seqlen: {self.max_len}')
+        print(f'max seqlen: {self.max_len}')
         return self.max_len
 
     def collate_fn(self, data):
         datnew = []
         dat = pd.DataFrame(data)
+        masks = []
         for i in dat:  # row index
             if i <= 3:
-                datnew.append(pad_sequence(dat[i], True))  # pad
-            # elif i == 3:
-            #     datnew.append(pad_sequence(dat[i], True))  # reverse
+                padded_sequence = pad_sequence(dat[i], True)
+                datnew.append(padded_sequence)  # pad
+                mask = padded_sequence != 0
+                masks.append(mask)
+
             else:
                 datnew.append(dat[i].tolist())  # origin
-        return datnew
+        return datnew, masks

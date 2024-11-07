@@ -2,8 +2,8 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from model import MultimodalSentimentModel  # Importing the newly created model
-from dataloader_cmumosi import CMUMOSIDataset  # Assuming the dataset class remains the same for MOSI and MOSEI
+from model import MultimodalSentimentModel
+from dataloader_cmumosi import CMUMOSIDataset
 
 import os
 import time
@@ -24,7 +24,7 @@ import sys
 sys.path.append('../')
 import config
 
-def train_or_eval_model(model, dataloader, criterion,  device, optimizer=None,train=False):
+def train_or_eval_model(model, dataloader, criterion, route_loss, device, optimizer=None,train=False):
 
     if train:
         model.train()
@@ -34,7 +34,7 @@ def train_or_eval_model(model, dataloader, criterion,  device, optimizer=None,tr
     total_loss = 0.0
     correct_sample = 0
     total_sample = 0
-    for data in dataloader:
+    for data, masks in dataloader:
 
         # print(data[3])
         # print(type(data)) # list
@@ -50,18 +50,47 @@ def train_or_eval_model(model, dataloader, criterion,  device, optimizer=None,tr
         # print(f"inputs形状：{inputs.shape}")   # torch.Size([32, seq, 2560])
         labels = data[3]
         labels = labels.view(-1)
+        masks[3] = masks[3].view(-1)
         # print(f"labels形状：{labels.shape}")
         inputs, labels = inputs.to(device), labels.to(device)
-        context = torch.zeros(1, 256).to(device)
-
+        context = torch.cat((data[0], data[1], data[2]), dim=-1).to(device)
+        mask = torch.cat((masks[0], masks[1], masks[2]), dim=-1).to(device)
+        # print("mask shape:", mask.shape)
         # 前向传播计算预测值
-        outputs = model(inputs, context)
+        outputs, route_decision = model(inputs, context)
+        route_decision = route_decision.view(-1, route_decision.size(-1))
+        # print(route_decision.shape) # torch.Size([32, seq, 1])
+        # print(route_decision[0, :, 0])
+        # print(route_decision.mean(dim=1).view(-1))
         outputs = outputs.view(-1, outputs.size(-1))
-        # print(f"outputs形状：{outputs.shape}")
-        binary_labels = (labels > 0).long()  # 将 labels 转换为二分类。大于零为正类 (1)，小于零为负类 (0)
+        route_mask = mask
+        mask = mask.view(-1, mask.size(-1))
+        mask = mask.any(dim=1, keepdim=True)  # 生成形状为 (num, 1) 的样本级 mask
 
-        # 计算损失
-        loss = criterion(outputs, binary_labels)
+        # print(f"outputs形状：{outputs.shape}")
+
+        binary_labels = (labels > 0).float()  # 将 labels 转换为二分类。大于零为正类 (1)，小于零为负类 (0)
+        # positive_count = (labels > 0).sum().item()
+        # negative_count = (labels < 0).sum().item()
+        # zero_count = (labels == 0).sum().item()
+        #
+        # print(f"正样本数量: {positive_count}")
+        # print(f"负样本数量: {negative_count}")
+        # print(f"零样本数量: {zero_count}")
+
+        route_labels = torch.ones(route_decision.size()).to(device)
+
+        # print(f"outputs.shape", outputs.shape)
+        # print(f"mask.shape", mask.shape)
+        # print(f"outputs[mask].shape", outputs[mask].shape)
+        # print(f"masks[3].shape", masks[3].shape)
+        # print(f"binary_labels.shape", binary_labels.shape)
+        # print(f"binary_labels[masks[3]].shape", binary_labels[masks[3]].shape)
+        # 计算分类和路由损失
+        label_mask = mask.squeeze()
+        cls_loss = criterion(outputs[mask], binary_labels[label_mask])
+        r_loss = route_loss(route_decision[mask], route_labels[mask])
+        loss = cls_loss + r_loss * 0.5
 
         # 清空梯度->反向传播计算梯度->更新参数
         if train:
@@ -72,36 +101,50 @@ def train_or_eval_model(model, dataloader, criterion,  device, optimizer=None,tr
         total_loss += loss.item()
 
         # Calculate accuracy
-        _, predicted = torch.max(outputs, 1)
-        total_sample += labels.size(0)
-        correct_sample += (predicted == labels).sum().item()
+        predicted = (outputs[mask] > 0).long()  # 正类为 1，负类为 0
+        total_sample += binary_labels[label_mask].size(0)
+        correct_sample += (predicted == binary_labels[label_mask]).sum().item()
 
     return total_loss / len(dataloader), correct_sample / total_sample * 100
 
 
 def main():
     # device = torch.device("cpu")
-
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # Hyperparameters
     input_dim = 2560  # 暂时设置成了adim+vdim+tdim
     hidden_dim = 128
-    output_dim = 2  # Assuming binary sentiment classification
+    output_dim = 1
 
-    # Instantiate the model
+    # Model
     model = MultimodalSentimentModel(input_dim, hidden_dim, output_dim).to(device)
+    # model.load_state_dict(torch.load('../save/model_weights.pth'))
 
     # Criterion and optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    route_loss = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 
     # Loading datasets (formal and informal separately)
-
     # dataset_informal = CMUMOSIDataset(label_path=config.PATH_TO_LABEL['CMUMOSI'],
     #                          audio_root=audio_root,
     #                          text_root=text_root,
     #                          video_root=video_root)
+    #
+    # trainNum = len(dataset_informal.trainVids)
+    # valNum = len(dataset_informal.valVids)
+    # testNum = len(dataset_informal.testVids)
+    # train_idxs = list(range(0, trainNum))
+    # val_idxs = list(range(trainNum, trainNum + valNum))
+    # test_idxs = list(range(trainNum + valNum, trainNum + valNum + testNum))
+    #
+    # # Creating dataloaders
+    # train_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(train_idxs),collate_fn=dataset_informal.collate_fn)
+    # val_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(val_idxs), collate_fn=dataset_informal.collate_fn)
+    # test_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(test_idxs), collate_fn=dataset_informal.collate_fn)
+
+
     dataset_formal = CMUMOSIDataset(label_path=config.PATH_TO_LABEL['CMUMOSEI'],
                              audio_root=audio_root,
                              text_root=text_root,
@@ -114,34 +157,46 @@ def main():
     val_idxs = list(range(trainNum, trainNum + valNum))
     test_idxs = list(range(trainNum + valNum, trainNum + valNum + testNum))
 
-    # Creating dataloaders
-    # train_loader_informal = DataLoader(dataset_informal, batch_size=32, shuffle=True, collate_fn=dataset_informal.collate_fn)
     train_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(train_idxs), collate_fn=dataset_formal.collate_fn)
     val_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(val_idxs), collate_fn=dataset_formal.collate_fn)
     test_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(test_idxs), collate_fn=dataset_formal.collate_fn)
 
     # Training loop
-    epochs = 20
-    for epoch in range(epochs):
+    epochs = 1000
+    best_test_acc = 0
+    best_epoch = 0
+    best_model = None
 
-        # print(f"Epoch {epoch + 1}/{epochs} - Training on MOSI (Informal)")
-        # informal_loss, informal_accuracy = train(model, train_loader_informal, criterion, optimizer, device)
-        # print(f"Informal Training Loss: {informal_loss:.4f} | Accuracy: {informal_accuracy:.2f}%")
+    for epoch in range(epochs):
+        # print(f"Epoch {epoch + 1}/{epochs} - Training on MOSI (InFormal)")
+        # informal_loss_train, informal_accuracy_train = train_or_eval_model(model, train_loader_informal, criterion, route_loss, device, optimizer=optimizer, train=True)
+        # informal_loss_val, informal_accuracy_val = train_or_eval_model(model, val_loader_informal, criterion, route_loss, device, optimizer=None, train=False)
+        # informal_loss_test, informal_accuracy_test = train_or_eval_model(model, test_loader_informal, criterion, route_loss, device, optimizer=None, train=False)
+        # if informal_accuracy_test > best_test_acc:
+        #     best_test_acc = informal_accuracy_test
+        #     best_epoch = epoch + 1
+        # print(f"Formal Training Loss: {informal_loss_train:.2f} | Accuracy: {informal_accuracy_train:.2f}%")
+        # print(f"Formal Validing Loss: {informal_loss_val:.2f} | Accuracy: {informal_accuracy_val:.2f}%")
+        # print(f"Formal Testing Loss: {informal_loss_test:.2f} | Accuracy: {informal_accuracy_test:.2f}%")
+        # print(f"best_test_acc: {best_test_acc:.2f}% in epoch {best_epoch}")
 
         print(f"Epoch {epoch + 1}/{epochs} - Training on MOSEI (Formal)")
-        formal_loss_train, formal_accuracy_train = train_or_eval_model(model, train_loader_formal, criterion, device, optimizer=optimizer, train=True)
-        formal_loss_val, formal_accuracy_val = train_or_eval_model(model, val_loader_formal, criterion, device, optimizer=None, train=False)
-        formal_loss_test, formal_accuracy_test = train_or_eval_model(model, test_loader_formal, criterion, device, optimizer=None, train=False)
-
-        print(f"Formal Training Loss: {formal_loss_train:.4f} | Accuracy: {formal_accuracy_train:.2f}%")
-        print(f"Formal Validing Loss: {formal_loss_val:.4f} | Accuracy: {formal_accuracy_val:.2f}%")
-        print(f"Formal Testing Loss: {formal_loss_test:.4f} | Accuracy: {formal_accuracy_test:.2f}%")
+        formal_loss_train, formal_accuracy_train = train_or_eval_model(model, train_loader_formal, criterion, route_loss, device, optimizer=optimizer, train=True)
+        formal_loss_val, formal_accuracy_val = train_or_eval_model(model, val_loader_formal, criterion, route_loss, device, optimizer=None, train=False)
+        formal_loss_test, formal_accuracy_test = train_or_eval_model(model, test_loader_formal, criterion, route_loss, device, optimizer=None, train=False)
+        if formal_accuracy_test > best_test_acc:
+            best_test_acc = formal_accuracy_test
+            best_epoch = epoch + 1
+            # torch.save(model.state_dict(), '../save/model_weights.pth')
+        print(f"Formal Training Loss: {formal_loss_train:.2f} | Accuracy: {formal_accuracy_train:.2f}%")
+        print(f"Formal Validing Loss: {formal_loss_val:.2f} | Accuracy: {formal_accuracy_val:.2f}%")
+        print(f"Formal Testing Loss: {formal_loss_test:.2f} | Accuracy: {formal_accuracy_test:.2f}%")
+        print(f"best_test_acc: {best_test_acc:.2f}% in epoch {best_epoch}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    ## Params for input
     parser.add_argument('--audio-feature', type=str, default='wav2vec-large-c-UTT', help='audio feature name')
     parser.add_argument('--text-feature', type=str, default='deberta-large-4-UTT', help='text feature name')
     parser.add_argument('--video-feature', type=str, default='manet_UTT', help='video feature name')
