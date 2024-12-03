@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GATConv
 
 class FeatureDecoupler(nn.Module):
     def __init__(self, feature_dims, shared_dims, private_dims):
@@ -42,6 +45,125 @@ class DynamicGraphDistiller(nn.Module):
         # 投影到目标维度
         distilled_features = self.output_proj(distilled_features)
         return distilled_features
+
+class GATModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_heads=4):
+        super(GATModel, self).__init__()
+        self.gat1 = GATConv(input_dim, output_dim, heads=1, dropout=0.3)
+        # self.gat2 = GATConv(hidden_dim * num_heads, output_dim, heads=1, dropout=0.3)
+
+    def forward(self, distilled_features):
+        outputs = []
+        """
+               使用余弦相似度构建图的边。
+               distilled_features: 每个模态的共享特征，形状为 ( batch_size, seq_len, shared_dim)
+               """
+        seq_len = distilled_features.shape[1]
+
+        # 计算余弦相似度并构建边
+        for b in range(distilled_features.shape[0]):
+            seq_features = distilled_features[b]  # 取出当前batch的所有序列特征
+            normed_features = F.normalize(seq_features, p=2, dim=-1)  # 对每个序列进行归一化，按维度dim
+            edges = []
+            # 计算余弦相似度
+            cosine_sim = torch.mm(normed_features, normed_features.t())  # 计算所有序列对之间的余弦相似度
+
+            # 获取所有非对角元素（即序列对之间的相似度）
+            for i in range(seq_len):
+                for j in range(i + 1, seq_len):
+                    similarity = cosine_sim[i, j].item()  # 获取相似度值
+                    if similarity > 0.9:  # 设定一个阈值筛选边
+                        edges.append((i, j))  # 保存 (seq1_idx, seq2_idx)
+
+            edges = torch.tensor(edges, dtype=torch.int, device=torch.device('cuda:0')).T
+            x = F.relu(self.gat1(seq_features, edges))
+            outputs.append(x)
+            # x = self.gat2(x, edge_index)
+
+        outputs = torch.stack(outputs, dim=0)
+        return outputs  # batch seq dim
+
+
+class GraphAttentionLayer(nn.Module):
+    def __init__(self, in_feature, out_feature, dropout, aplha, concat=True):
+        super(GraphAttentionLayer, self).__init__()
+        self.in_feature = in_feature
+        self.out_feature = out_feature
+        self.dropout = dropout
+        self.alpha = aplha
+        self.concat = concat
+
+        self.Wlinear = nn.Linear(in_feature, out_feature)
+        # self.W=nn.Parameter(torch.empty(size=(batch_size,in_feature,out_feature)))
+        nn.init.xavier_uniform_(self.Wlinear.weight, gain=1.414)
+
+        self.aiLinear = nn.Linear(out_feature, 1)
+        self.ajLinear = nn.Linear(out_feature, 1)
+        # self.a=nn.Parameter(torch.empty(size=(batch_size,2*out_feature,1)))
+        nn.init.xavier_uniform_(self.aiLinear.weight, gain=1.414)
+        nn.init.xavier_uniform_(self.ajLinear.weight, gain=1.414)
+
+        self.leakyRelu = nn.LeakyReLU(self.alpha)
+
+    def getAttentionE(self, Wh):
+        # 重点改了这个函数
+        Wh1 = self.aiLinear(Wh)
+        Wh2 = self.ajLinear(Wh)
+        Wh2 = Wh2.view(Wh2.shape[0], Wh2.shape[2], Wh2.shape[1])
+        # Wh1=torch.bmm(Wh,self.a[:,:self.out_feature,:])    #Wh:size(node,out_feature),a[:out_eature,:]:size(out_feature,1) => Wh1:size(node,1)
+        # Wh2=torch.bmm(Wh,self.a[:,self.out_feature:,:])    #Wh:size(node,out_feature),a[out_eature:,:]:size(out_feature,1) => Wh2:size(node,1)
+
+        e = Wh1 + Wh2  # broadcast add, => e:size(node,node)
+        return self.leakyRelu(e)
+
+    def forward(self, h, adj):
+        # print(h.shape)
+        Wh = self.Wlinear(h)
+        # Wh=torch.bmm(h,self.W)   #h:size(node,in_feature),W:size(in_feature,out_feature) => Wh:size(node,out_feature)
+        e = self.getAttentionE(Wh)
+
+        zero_vec = -1e9 * torch.ones_like(e)
+        attention = torch.where(adj > 0, e, zero_vec)
+        attention = F.softmax(attention, dim=2)
+        attention = F.dropout(attention, self.dropout, training=self.training)
+        h_hat = torch.bmm(attention,
+                          Wh)  # attention:size(node,node),Wh:size(node,out_fature) => h_hat:size(node,out_feature)
+
+        if self.concat:
+            return F.elu(h_hat)
+        else:
+            return h_hat
+
+    def __repr__(self):
+        return self.__class__.__name__ + ' (' + str(self.in_feature) + '->' + str(self.out_feature) + ')'
+
+
+class GAT(nn.Module):
+    def __init__(self, in_feature, hidden_feature, out_feature, attention_layers, dropout, alpha):
+        super(GAT, self).__init__()
+        self.in_feature = in_feature
+        self.out_feature = out_feature
+        self.hidden_feature = hidden_feature
+        self.dropout = dropout
+        self.alpha = alpha
+        self.attention_layers = attention_layers
+
+        self.attentions = [GraphAttentionLayer(in_feature, hidden_feature, dropout, alpha, True) for i in
+                           range(attention_layers)]
+
+        for i, attention in enumerate(self.attentions):
+            self.add_module('attention_{}'.format(i), attention)
+
+        self.out_attention = GraphAttentionLayer(attention_layers * hidden_feature, out_feature, dropout, alpha, False)
+
+    def forward(self, h, adj):
+        # print(h)
+        h = F.dropout(h, self.dropout, training=self.training)
+
+        h = torch.cat([attention(h, adj) for attention in self.attentions], dim=2)
+        h = F.dropout(h, self.dropout, training=self.training)
+        h = F.elu(self.out_attention(h, adj))
+        return h
 
 
 class RoutingMechanism(nn.Module):
@@ -121,9 +243,11 @@ class MultimodalSentimentModel(nn.Module):
         # 动态蒸馏模块
         self.dynamic_distiller = DynamicGraphDistiller(self.shared_dims, output_dim=128)  # 蒸馏后的输出维度为 128
 
+        # 图卷积模型
+        self.gat_model = GATModel(input_dim=128, hidden_dim=hidden_dim, output_dim=128, num_heads=4)
+
         # 路由机制
         self.router = RoutingMechanism(sum(self.feature_dims), 128, 1)  # 输入为拼接后的上下文
-
 
         # 正式与非正式专家模型
         self.informal_expert = InformalExpert(128, hidden_dim, output_dim)
@@ -146,12 +270,15 @@ class MultimodalSentimentModel(nn.Module):
         distilled_features = self.dynamic_distiller(shared_features)  # 形状 (batch_size, seq_len, 128)
 
 
+        # 4. 图卷积进行信息聚合
+        output = self.gat_model(distilled_features)
+
         # 5. 路由器决策
         route_decision = self.router(context)  # 形状 (batch_size, seq_len, 1)
 
         # 6. 专家模型预测
-        output_formal = self.formal_expert(distilled_features)  # 形状 (batch_size, seq_len, output_dim)
-        output_informal = self.informal_expert(distilled_features)  # 形状 (batch_size, seq_len, output_dim)
+        output_formal = self.formal_expert(output)  # 形状 (batch_size, seq_len, output_dim)
+        output_informal = self.informal_expert(output)  # 形状 (batch_size, seq_len, output_dim)
 
         # 7. 动态加权融合
         output = route_decision * output_formal + (1 - route_decision) * output_informal
