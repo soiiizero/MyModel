@@ -79,7 +79,7 @@ def train_or_eval_model(model, dataloader, criterion, route_loss, device, optimi
         # print(f"负样本数量: {negative_count}")
         # print(f"零样本数量: {zero_count}")
 
-        route_labels = torch.zeros(route_decision.size()).to(device)
+        route_labels = torch.ones(route_decision.size()).to(device)
 
         # print(f"outputs.shape", outputs.shape)
         # print(f"mask.shape", mask.shape)
@@ -133,39 +133,39 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 
     # Loading datasets (formal and informal separately)
-    dataset_informal = CMUMOSIDataset(label_path=config.PATH_TO_LABEL['CMUMOSI'],
-                             audio_root=audio_root,
-                             text_root=text_root,
-                             video_root=video_root)
-
-    trainNum = len(dataset_informal.trainVids)
-    valNum = len(dataset_informal.valVids)
-    testNum = len(dataset_informal.testVids)
-    train_idxs = list(range(0, trainNum))
-    val_idxs = list(range(trainNum, trainNum + valNum))
-    test_idxs = list(range(trainNum + valNum, trainNum + valNum + testNum))
-
-    # Creating dataloaders
-    train_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(train_idxs),collate_fn=dataset_informal.collate_fn)
-    val_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(val_idxs), collate_fn=dataset_informal.collate_fn)
-    test_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(test_idxs), collate_fn=dataset_informal.collate_fn)
-
-
-    # dataset_formal = CMUMOSIDataset(label_path=config.PATH_TO_LABEL['CMUMOSEI'],
+    # dataset_informal = CMUMOSIDataset(label_path=config.PATH_TO_LABEL['CMUMOSI'],
     #                          audio_root=audio_root,
     #                          text_root=text_root,
     #                          video_root=video_root)
     #
-    # trainNum = len(dataset_formal.trainVids)
-    # valNum = len(dataset_formal.valVids)
-    # testNum = len(dataset_formal.testVids)
+    # trainNum = len(dataset_informal.trainVids)
+    # valNum = len(dataset_informal.valVids)
+    # testNum = len(dataset_informal.testVids)
     # train_idxs = list(range(0, trainNum))
     # val_idxs = list(range(trainNum, trainNum + valNum))
     # test_idxs = list(range(trainNum + valNum, trainNum + valNum + testNum))
     #
-    # train_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(train_idxs), collate_fn=dataset_formal.collate_fn)
-    # val_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(val_idxs), collate_fn=dataset_formal.collate_fn)
-    # test_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(test_idxs), collate_fn=dataset_formal.collate_fn)
+    # # Creating dataloaders
+    # train_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(train_idxs),collate_fn=dataset_informal.collate_fn)
+    # val_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(val_idxs), collate_fn=dataset_informal.collate_fn)
+    # test_loader_informal = DataLoader(dataset_informal, batch_size=32, sampler=SubsetRandomSampler(test_idxs), collate_fn=dataset_informal.collate_fn)
+
+
+    dataset_formal = CMUMOSIDataset(label_path=config.PATH_TO_LABEL['CMUMOSEI'],
+                             audio_root=audio_root,
+                             text_root=text_root,
+                             video_root=video_root)
+
+    trainNum = len(dataset_formal.trainVids)
+    valNum = len(dataset_formal.valVids)
+    testNum = len(dataset_formal.testVids)
+    train_idxs = list(range(0, trainNum))
+    val_idxs = list(range(trainNum, trainNum + valNum))
+    test_idxs = list(range(trainNum + valNum, trainNum + valNum + testNum))
+
+    train_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(train_idxs), collate_fn=dataset_formal.collate_fn)
+    val_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(val_idxs), collate_fn=dataset_formal.collate_fn)
+    test_loader_formal = DataLoader(dataset_formal, batch_size=32, sampler=SubsetRandomSampler(test_idxs), collate_fn=dataset_formal.collate_fn)
 
     # Training loop
     epochs = 1000
@@ -179,19 +179,19 @@ def main():
 
     for epoch in range(epochs):
 
-        print(f"Epoch {epoch + 1}/{epochs} - Training on MOSI (InFormal)")
-        informal_loss_train, informal_accuracy_train = train_or_eval_model(model, train_loader_informal, criterion, route_loss, device, optimizer=optimizer, train=True)
-        informal_loss_val, informal_accuracy_val = train_or_eval_model(model, val_loader_informal, criterion, route_loss, device, optimizer=None, train=False)
-        informal_loss_test, informal_accuracy_test = train_or_eval_model(model, test_loader_informal, criterion, route_loss, device, optimizer=None, train=False)
-        if informal_accuracy_test > best_test_acc:
-            best_test_acc = informal_accuracy_test
-            best_epoch = epoch + 1
-            torch.save(model.state_dict(), '../save/model_weights_mosi.pth')
-
-        print(f"Formal Training Loss: {informal_loss_train:.2f} | Accuracy: {informal_accuracy_train:.2f}%")
-        print(f"Formal Validing Loss: {informal_loss_val:.2f} | Accuracy: {informal_accuracy_val:.2f}%")
-        print(f"Formal Testing Loss: {informal_loss_test:.2f} | Accuracy: {informal_accuracy_test:.2f}%")
-        print(f"best_test_acc: {best_test_acc:.2f}% in epoch {best_epoch}")
+        # print(f"Epoch {epoch + 1}/{epochs} - Training on MOSI (InFormal)")
+        # informal_loss_train, informal_accuracy_train = train_or_eval_model(model, train_loader_informal, criterion, route_loss, device, optimizer=optimizer, train=True)
+        # informal_loss_val, informal_accuracy_val = train_or_eval_model(model, val_loader_informal, criterion, route_loss, device, optimizer=None, train=False)
+        # informal_loss_test, informal_accuracy_test = train_or_eval_model(model, test_loader_informal, criterion, route_loss, device, optimizer=None, train=False)
+        # if informal_accuracy_test > best_test_acc:
+        #     best_test_acc = informal_accuracy_test
+        #     best_epoch = epoch + 1
+        #     torch.save(model.state_dict(), '../save/model_weights_mosi.pth')
+        #
+        # print(f"Formal Training Loss: {informal_loss_train:.2f} | Accuracy: {informal_accuracy_train:.2f}%")
+        # print(f"Formal Validing Loss: {informal_loss_val:.2f} | Accuracy: {informal_accuracy_val:.2f}%")
+        # print(f"Formal Testing Loss: {informal_loss_test:.2f} | Accuracy: {informal_accuracy_test:.2f}%")
+        # print(f"best_test_acc: {best_test_acc:.2f}% in epoch {best_epoch}")
 
         # 微调时逐步解冻正式专家模块
         # if epoch == 10:  # 假设从第 50 轮开始逐步解冻
@@ -199,18 +199,18 @@ def main():
         # elif epoch == 100:  # 在第 100 轮解冻路由器
         #     model.set_requires_grad(['shared_layers'], True)
 
-        # print(f"Epoch {epoch + 1}/{epochs} - Training on MOSEI (Formal)")
-        # formal_loss_train, formal_accuracy_train = train_or_eval_model(model, train_loader_formal, criterion, route_loss, device, optimizer=optimizer, train=True)
-        # formal_loss_val, formal_accuracy_val = train_or_eval_model(model, val_loader_formal, criterion, route_loss, device, optimizer=None, train=False)
-        # formal_loss_test, formal_accuracy_test = train_or_eval_model(model, test_loader_formal, criterion, route_loss, device, optimizer=None, train=False)
-        # if formal_accuracy_test > best_test_acc:
-        #     best_test_acc = formal_accuracy_test
-        #     best_epoch = epoch + 1
-        #     # torch.save(model.state_dict(), '../save/model_weights.pth')
-        # print(f"Formal Training Loss: {formal_loss_train:.2f} | Accuracy: {formal_accuracy_train:.2f}%")
-        # print(f"Formal Validing Loss: {formal_loss_val:.2f} | Accuracy: {formal_accuracy_val:.2f}%")
-        # print(f"Formal Testing Loss: {formal_loss_test:.2f} | Accuracy: {formal_accuracy_test:.2f}%")
-        # print(f"best_test_acc: {best_test_acc:.2f}% in epoch {best_epoch}")
+        print(f"Epoch {epoch + 1}/{epochs} - Training on MOSEI (Formal)")
+        formal_loss_train, formal_accuracy_train = train_or_eval_model(model, train_loader_formal, criterion, route_loss, device, optimizer=optimizer, train=True)
+        formal_loss_val, formal_accuracy_val = train_or_eval_model(model, val_loader_formal, criterion, route_loss, device, optimizer=None, train=False)
+        formal_loss_test, formal_accuracy_test = train_or_eval_model(model, test_loader_formal, criterion, route_loss, device, optimizer=None, train=False)
+        if formal_accuracy_test > best_test_acc:
+            best_test_acc = formal_accuracy_test
+            best_epoch = epoch + 1
+            # torch.save(model.state_dict(), '../save/model_weights.pth')
+        print(f"Formal Training Loss: {formal_loss_train:.2f} | Accuracy: {formal_accuracy_train:.2f}%")
+        print(f"Formal Validing Loss: {formal_loss_val:.2f} | Accuracy: {formal_accuracy_val:.2f}%")
+        print(f"Formal Testing Loss: {formal_loss_test:.2f} | Accuracy: {formal_accuracy_test:.2f}%")
+        print(f"best_test_acc: {best_test_acc:.2f}% in epoch {best_epoch}")
 
 
 if __name__ == "__main__":
@@ -219,7 +219,7 @@ if __name__ == "__main__":
     parser.add_argument('--audio-feature', type=str, default='wav2vec-large-c-UTT', help='audio feature name')
     parser.add_argument('--text-feature', type=str, default='deberta-large-4-UTT', help='text feature name')
     parser.add_argument('--video-feature', type=str, default='manet_UTT', help='video feature name')
-    parser.add_argument('--dataset', type=str, default='CMUMOSI', help='dataset type')
+    parser.add_argument('--dataset', type=str, default='CMUMOSEI', help='dataset type')
 
     args = parser.parse_args()
     print(args)

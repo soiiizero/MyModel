@@ -52,30 +52,59 @@ class GATModel(nn.Module):
         self.gat1 = GATConv(input_dim, output_dim, heads=1, dropout=0.3)
         # self.gat2 = GATConv(hidden_dim * num_heads, output_dim, heads=1, dropout=0.3)
 
-    def forward(self, distilled_features):
+    def forward(self, distilled_features, private_features):
         outputs = []
         """
                使用余弦相似度构建图的边。
                distilled_features: 每个模态的共享特征，形状为 ( batch_size, seq_len, shared_dim)
+               private_features: 模态私有特征 list中有3个元素，对应每个模态( batch_size, seq_len, dim)
                """
         seq_len = distilled_features.shape[1]
+        private_a = private_features[0]
+        private_t = private_features[1]
+        private_v = private_features[2]
 
         # 计算余弦相似度并构建边
         for b in range(distilled_features.shape[0]):
             seq_features = distilled_features[b]  # 取出当前batch的所有序列特征
-            normed_features = F.normalize(seq_features, p=2, dim=-1)  # 对每个序列进行归一化，按维度dim
+            private_a_seq = private_a[b]
+            private_t_seq = private_t[b]
+            private_v_seq = private_v[b]
+            # normed_features = F.normalize(seq_features, p=2, dim=-1)  # 对每个序列进行归一化，按维度dim
+            normed_private_a = F.normalize(private_a_seq, p=2, dim=-1)
+            normed_private_t = F.normalize(private_t_seq, p=2, dim=-1)
+            normed_private_v = F.normalize(private_v_seq, p=2, dim=-1)
             edges = []
-            # 计算余弦相似度
-            cosine_sim = torch.mm(normed_features, normed_features.t())  # 计算所有序列对之间的余弦相似度
+            # 计算每个模态余弦相似度
+            cosine_sim_a = torch.mm(normed_private_a, normed_private_a.t())
+            cosine_sim_t = torch.mm(normed_private_t, normed_private_t.t())
+            cosine_sim_v = torch.mm(normed_private_v, normed_private_v.t())
 
             # 获取所有非对角元素（即序列对之间的相似度）
             for i in range(seq_len):
                 for j in range(i + 1, seq_len):
-                    similarity = cosine_sim[i, j].item()  # 获取相似度值
-                    if similarity > 0.9:  # 设定一个阈值筛选边
+                    similarity_a = cosine_sim_a[i, j].item()  # 获取相似度值
+                    similarity_t = cosine_sim_t[i, j].item()
+                    similarity_v = cosine_sim_v[i, j].item()
+                    if similarity_t > 0.9 and similarity_v > 0.6 and similarity_a > 0.6:  # 设定阈值筛选边
                         edges.append((i, j))  # 保存 (seq1_idx, seq2_idx)
 
+            if len(edges) == 0:
+                print("呵呵，没有边")
+                # edges = torch.tensor([[0], [1]], dtype=torch.int, device=torch.device('cuda:0')) # 或者返回一个默认的边构建逻辑
+                # 获取所有非对角元素（即序列对之间的相似度）
+                for i in range(seq_len):
+                    for j in range(i + 1, seq_len):
+                        similarity_t = cosine_sim_t[i, j].item()
+                        if similarity_t > 0.5 :  # 设定阈值筛选边
+                            edges.append((i, j))  # 保存 (seq1_idx, seq2_idx)
+                edges = torch.tensor(edges, dtype=torch.int, device=torch.device('cuda:0')).T
+
+            if len(edges) == 0:
+                edges = torch.tensor([[0], [1]], dtype=torch.int, device=torch.device('cuda:0')) # 或者返回一个默认的边构建逻辑
+
             edges = torch.tensor(edges, dtype=torch.int, device=torch.device('cuda:0')).T
+
             x = F.relu(self.gat1(seq_features, edges))
             outputs.append(x)
             # x = self.gat2(x, edge_index)
@@ -83,88 +112,86 @@ class GATModel(nn.Module):
         outputs = torch.stack(outputs, dim=0)
         return outputs  # batch seq dim
 
-
-class GraphAttentionLayer(nn.Module):
-    def __init__(self, in_feature, out_feature, dropout, aplha, concat=True):
-        super(GraphAttentionLayer, self).__init__()
-        self.in_feature = in_feature
-        self.out_feature = out_feature
-        self.dropout = dropout
-        self.alpha = aplha
-        self.concat = concat
-
-        self.Wlinear = nn.Linear(in_feature, out_feature)
-        # self.W=nn.Parameter(torch.empty(size=(batch_size,in_feature,out_feature)))
-        nn.init.xavier_uniform_(self.Wlinear.weight, gain=1.414)
-
-        self.aiLinear = nn.Linear(out_feature, 1)
-        self.ajLinear = nn.Linear(out_feature, 1)
-        # self.a=nn.Parameter(torch.empty(size=(batch_size,2*out_feature,1)))
-        nn.init.xavier_uniform_(self.aiLinear.weight, gain=1.414)
-        nn.init.xavier_uniform_(self.ajLinear.weight, gain=1.414)
-
-        self.leakyRelu = nn.LeakyReLU(self.alpha)
-
-    def getAttentionE(self, Wh):
-        # 重点改了这个函数
-        Wh1 = self.aiLinear(Wh)
-        Wh2 = self.ajLinear(Wh)
-        Wh2 = Wh2.view(Wh2.shape[0], Wh2.shape[2], Wh2.shape[1])
-        # Wh1=torch.bmm(Wh,self.a[:,:self.out_feature,:])    #Wh:size(node,out_feature),a[:out_eature,:]:size(out_feature,1) => Wh1:size(node,1)
-        # Wh2=torch.bmm(Wh,self.a[:,self.out_feature:,:])    #Wh:size(node,out_feature),a[out_eature:,:]:size(out_feature,1) => Wh2:size(node,1)
-
-        e = Wh1 + Wh2  # broadcast add, => e:size(node,node)
-        return self.leakyRelu(e)
-
-    def forward(self, h, adj):
-        # print(h.shape)
-        Wh = self.Wlinear(h)
-        # Wh=torch.bmm(h,self.W)   #h:size(node,in_feature),W:size(in_feature,out_feature) => Wh:size(node,out_feature)
-        e = self.getAttentionE(Wh)
-
-        zero_vec = -1e9 * torch.ones_like(e)
-        attention = torch.where(adj > 0, e, zero_vec)
-        attention = F.softmax(attention, dim=2)
-        attention = F.dropout(attention, self.dropout, training=self.training)
-        h_hat = torch.bmm(attention,
-                          Wh)  # attention:size(node,node),Wh:size(node,out_fature) => h_hat:size(node,out_feature)
-
-        if self.concat:
-            return F.elu(h_hat)
-        else:
-            return h_hat
-
-    def __repr__(self):
-        return self.__class__.__name__ + ' (' + str(self.in_feature) + '->' + str(self.out_feature) + ')'
-
-
-class GAT(nn.Module):
-    def __init__(self, in_feature, hidden_feature, out_feature, attention_layers, dropout, alpha):
-        super(GAT, self).__init__()
-        self.in_feature = in_feature
-        self.out_feature = out_feature
-        self.hidden_feature = hidden_feature
-        self.dropout = dropout
-        self.alpha = alpha
-        self.attention_layers = attention_layers
-
-        self.attentions = [GraphAttentionLayer(in_feature, hidden_feature, dropout, alpha, True) for i in
-                           range(attention_layers)]
-
-        for i, attention in enumerate(self.attentions):
-            self.add_module('attention_{}'.format(i), attention)
-
-        self.out_attention = GraphAttentionLayer(attention_layers * hidden_feature, out_feature, dropout, alpha, False)
-
-    def forward(self, h, adj):
-        # print(h)
-        h = F.dropout(h, self.dropout, training=self.training)
-
-        h = torch.cat([attention(h, adj) for attention in self.attentions], dim=2)
-        h = F.dropout(h, self.dropout, training=self.training)
-        h = F.elu(self.out_attention(h, adj))
-        return h
-
+# class GraphAttentionLayer(nn.Module):
+#     def __init__(self, in_feature, out_feature, dropout, aplha, concat=True):
+#         super(GraphAttentionLayer, self).__init__()
+#         self.in_feature = in_feature
+#         self.out_feature = out_feature
+#         self.dropout = dropout
+#         self.alpha = aplha
+#         self.concat = concat
+#
+#         self.Wlinear = nn.Linear(in_feature, out_feature)
+#         # self.W=nn.Parameter(torch.empty(size=(batch_size,in_feature,out_feature)))
+#         nn.init.xavier_uniform_(self.Wlinear.weight, gain=1.414)
+#
+#         self.aiLinear = nn.Linear(out_feature, 1)
+#         self.ajLinear = nn.Linear(out_feature, 1)
+#         # self.a=nn.Parameter(torch.empty(size=(batch_size,2*out_feature,1)))
+#         nn.init.xavier_uniform_(self.aiLinear.weight, gain=1.414)
+#         nn.init.xavier_uniform_(self.ajLinear.weight, gain=1.414)
+#
+#         self.leakyRelu = nn.LeakyReLU(self.alpha)
+#
+#     def getAttentionE(self, Wh):
+#         # 重点改了这个函数
+#         Wh1 = self.aiLinear(Wh)
+#         Wh2 = self.ajLinear(Wh)
+#         Wh2 = Wh2.view(Wh2.shape[0], Wh2.shape[2], Wh2.shape[1])
+#         # Wh1=torch.bmm(Wh,self.a[:,:self.out_feature,:])    #Wh:size(node,out_feature),a[:out_eature,:]:size(out_feature,1) => Wh1:size(node,1)
+#         # Wh2=torch.bmm(Wh,self.a[:,self.out_feature:,:])    #Wh:size(node,out_feature),a[out_eature:,:]:size(out_feature,1) => Wh2:size(node,1)
+#
+#         e = Wh1 + Wh2  # broadcast add, => e:size(node,node)
+#         return self.leakyRelu(e)
+#
+#     def forward(self, h, adj):
+#         # print(h.shape)
+#         Wh = self.Wlinear(h)
+#         # Wh=torch.bmm(h,self.W)   #h:size(node,in_feature),W:size(in_feature,out_feature) => Wh:size(node,out_feature)
+#         e = self.getAttentionE(Wh)
+#
+#         zero_vec = -1e9 * torch.ones_like(e)
+#         attention = torch.where(adj > 0, e, zero_vec)
+#         attention = F.softmax(attention, dim=2)
+#         attention = F.dropout(attention, self.dropout, training=self.training)
+#         h_hat = torch.bmm(attention,
+#                           Wh)  # attention:size(node,node),Wh:size(node,out_fature) => h_hat:size(node,out_feature)
+#
+#         if self.concat:
+#             return F.elu(h_hat)
+#         else:
+#             return h_hat
+#
+#     def __repr__(self):
+#         return self.__class__.__name__ + ' (' + str(self.in_feature) + '->' + str(self.out_feature) + ')'
+#
+#
+# class GAT(nn.Module):
+#     def __init__(self, in_feature, hidden_feature, out_feature, attention_layers, dropout, alpha):
+#         super(GAT, self).__init__()
+#         self.in_feature = in_feature
+#         self.out_feature = out_feature
+#         self.hidden_feature = hidden_feature
+#         self.dropout = dropout
+#         self.alpha = alpha
+#         self.attention_layers = attention_layers
+#
+#         self.attentions = [GraphAttentionLayer(in_feature, hidden_feature, dropout, alpha, True) for i in
+#                            range(attention_layers)]
+#
+#         for i, attention in enumerate(self.attentions):
+#             self.add_module('attention_{}'.format(i), attention)
+#
+#         self.out_attention = GraphAttentionLayer(attention_layers * hidden_feature, out_feature, dropout, alpha, False)
+#
+#     def forward(self, h, adj):
+#         # print(h)
+#         h = F.dropout(h, self.dropout, training=self.training)
+#
+#         h = torch.cat([attention(h, adj) for attention in self.attentions], dim=2)
+#         h = F.dropout(h, self.dropout, training=self.training)
+#         h = F.elu(self.out_attention(h, adj))
+#         return h
 
 class RoutingMechanism(nn.Module):
     def __init__(self, input_dim=2560, hidden_dim=128, output_dim=1, num_heads=4, dropout_rate=0.3):
@@ -228,7 +255,7 @@ class MultimodalSentimentModel(nn.Module):
         参数:
             feature_dims: 每个模态的输入维度列表，如 [512, 1024, 1024]。
             shared_dims: 每个模态的无关特征维度列表，如 [128, 128, 128]。
-            private_dims: 每个模态的特有特征维度列表，如 [384, 768, 768]。
+            private_dims: 每个模态的特有特征维度列表，如 [128, 128, 128]。
             hidden_dim: 专家模型的隐藏层维度。
             output_dim: 专家模型的输出维度（如分类任务的类别数）。
         """
@@ -240,7 +267,7 @@ class MultimodalSentimentModel(nn.Module):
         # 特征解耦模块
         self.feature_decoupler = FeatureDecoupler(self.feature_dims, self.shared_dims, self.private_dims)
 
-        # 动态蒸馏模块
+        # 动态融合模块
         self.dynamic_distiller = DynamicGraphDistiller(self.shared_dims, output_dim=128)  # 蒸馏后的输出维度为 128
 
         # 图卷积模型
@@ -266,17 +293,16 @@ class MultimodalSentimentModel(nn.Module):
         # 1. 特征解耦
         shared_features, private_features = self.feature_decoupler(inputs)
 
-        # 2. 动态蒸馏模态无关特征
+        # 2. 融合模态无关特征
         distilled_features = self.dynamic_distiller(shared_features)  # 形状 (batch_size, seq_len, 128)
 
+        # 3. 图注意力卷积进行信息聚合
+        output = self.gat_model(distilled_features, private_features)
 
-        # 4. 图卷积进行信息聚合
-        output = self.gat_model(distilled_features)
-
-        # 5. 路由器决策
+        # 4. 路由器决策
         route_decision = self.router(context)  # 形状 (batch_size, seq_len, 1)
 
-        # 6. 专家模型预测
+        # 5. 专家模型预测
         output_formal = self.formal_expert(output)  # 形状 (batch_size, seq_len, output_dim)
         output_informal = self.informal_expert(output)  # 形状 (batch_size, seq_len, output_dim)
 
