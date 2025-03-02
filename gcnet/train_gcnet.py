@@ -116,7 +116,7 @@ def train_or_eval_model(model, dataloader, criterion, route_loss, device, optimi
 
 def main():
     # device = torch.device("cpu")
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
     # Hyperparameters
     input_dim = 2560  # 暂时设置成了adim+vdim+tdim

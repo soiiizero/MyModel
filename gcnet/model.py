@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import GATConv
+from torch.distributions import Normal
 
 class FeatureDecoupler(nn.Module):
     def __init__(self, feature_dims, shared_dims, private_dims):
@@ -46,171 +47,124 @@ class DynamicGraphDistiller(nn.Module):
         distilled_features = self.output_proj(distilled_features)
         return distilled_features
 
-class GATModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_heads=4):
-        super(GATModel, self).__init__()
-        self.gat1 = GATConv(input_dim, output_dim, heads=1, dropout=0.3)
-        # self.gat2 = GATConv(hidden_dim * num_heads, output_dim, heads=1, dropout=0.3)
+class GaussianDistribution(nn.Module):
+    def __init__(self, input_dim):
+        super(GaussianDistribution, self).__init__()
+        self.mean_layer = nn.Linear(input_dim, input_dim)
+        self.log_var_layer = nn.Linear(input_dim, input_dim)
+
+    def forward(self, x):
+        mean = self.mean_layer(x)
+        log_var = self.log_var_layer(x)
+        return mean, log_var
+
+class GATModelWithKL(nn.Module):
+    def __init__(self, private_dims, input_dim, hidden_dim, output_dim, num_heads=4, kl_threshold=0.5):
+        super(GATModelWithKL, self).__init__()
+        # 对私有特征进行高斯分布建模
+        self.gaussian = nn.ModuleList([
+            GaussianDistribution(private_dim) for private_dim in private_dims
+        ])
+        # 使用多头注意力机制
+        self.gat1 = GATConv(input_dim, hidden_dim, heads=num_heads, dropout=0.3)
+        self.gat2 = GATConv(hidden_dim * num_heads, output_dim, heads=1, dropout=0.3)
+        self.kl_threshold = kl_threshold
+
+    @staticmethod
+    def kl_divergence(mean_p, log_var_p, mean_q, log_var_q):
+        """计算两个高斯分布之间的KL散度"""
+        var_p = torch.exp(log_var_p)
+        var_q = torch.exp(log_var_q)
+        kl_loss = 0.5 * (log_var_q - log_var_p +
+                         (var_p + (mean_p - mean_q).pow(2)) / var_q - 1)
+        return torch.sum(kl_loss, dim=-1)
+
+    def construct_graph(self, private_means, private_log_vars, batch_size):
+        """为每个batch构建图结构"""
+        batch_edges = []
+        device = private_means[0].device  # 获取设备信息
+        for b in range(batch_size):
+            # 获取当前batch的分布参数
+            batch_means = [means[b] for means in private_means]
+            batch_log_vars = [log_vars[b] for log_vars in private_log_vars]
+
+            # 计算所有模态对之间的KL散度
+            for i in range(len(batch_means)):
+                for j in range(i + 1, len(batch_means)):
+                    kl_ij = self.kl_divergence(
+                        batch_means[i], batch_log_vars[i],
+                        batch_means[j], batch_log_vars[j]
+                    )
+
+                    if torch.mean(kl_ij) > self.kl_threshold:
+                        # 为当前batch添加边，需要考虑batch中的节点偏移
+                        offset = b * len(private_means)
+                        batch_edges.extend([
+                            [i + offset, j + offset],
+                            [j + offset, i + offset]  # 添加双向边
+                        ])
+
+        if not batch_edges:  # 如果没有边，添加自环
+            batch_edges = [[i, i] for i in range(batch_size * len(private_means))]
+
+        return torch.tensor(batch_edges, dtype=torch.long,device=device).t()
 
     def forward(self, distilled_features, private_features):
-        outputs = []
         """
-               使用余弦相似度构建图的边。
-               distilled_features: 每个模态的共享特征，形状为 ( batch_size, seq_len, shared_dim)
-               private_features: 模态私有特征 list中有3个元素，对应每个模态( batch_size, seq_len, dim)
-               """
-        seq_len = distilled_features.shape[1]
-        private_a = private_features[0]
-        private_t = private_features[1]
-        private_v = private_features[2]
+        参数:
+            distilled_features: [batch_size, seq_len, input_dim]
+            private_features: list of [batch_size, seq_len, private_dim]
+        返回:
+            outputs: [batch_size, seq_len, output_dim]
+        """
+        batch_size = distilled_features.shape[0]
+        device = distilled_features.device  # 获取输入设备
 
-        # 计算余弦相似度并构建边
-        for b in range(distilled_features.shape[0]):
-            seq_features = distilled_features[b]  # 取出当前batch的所有序列特征
-            private_a_seq = private_a[b]
-            private_t_seq = private_t[b]
-            private_v_seq = private_v[b]
-            # normed_features = F.normalize(seq_features, p=2, dim=-1)  # 对每个序列进行归一化，按维度dim
-            normed_private_a = F.normalize(private_a_seq, p=2, dim=-1)
-            normed_private_t = F.normalize(private_t_seq, p=2, dim=-1)
-            normed_private_v = F.normalize(private_v_seq, p=2, dim=-1)
-            edges = []
-            # 计算每个模态余弦相似度
-            cosine_sim_a = torch.mm(normed_private_a, normed_private_a.t())
-            cosine_sim_t = torch.mm(normed_private_t, normed_private_t.t())
-            cosine_sim_v = torch.mm(normed_private_v, normed_private_v.t())
+        # 确保模型在正确的设备上
+        self.to(device)
+        # 1. 对私有特征进行分布建模
+        private_means = []
+        private_log_vars = []
+        for i, features in enumerate(private_features):
+            features = features.to(device)  # 确保特征在正确的设备上
+            mean, log_var = self.gaussian[i](features)
+            private_means.append(mean)
+            private_log_vars.append(log_var)
 
-            # 获取所有非对角元素（即序列对之间的相似度）
-            for i in range(seq_len):
-                for j in range(i + 1, seq_len):
-                    similarity_a = cosine_sim_a[i, j].item()  # 获取相似度值
-                    similarity_t = cosine_sim_t[i, j].item()
-                    similarity_v = cosine_sim_v[i, j].item()
-                    if similarity_t > 0.9 and similarity_v > 0.6 and similarity_a > 0.6:  # 设定阈值筛选边
-                        edges.append((i, j))  # 保存 (seq1_idx, seq2_idx)
+        # 2. 构建图结构
+        edges = self.construct_graph(private_means, private_log_vars, batch_size)
 
-            if len(edges) == 0:
-                print("呵呵，没有边")
-                # edges = torch.tensor([[0], [1]], dtype=torch.int, device=torch.device('cuda:0')) # 或者返回一个默认的边构建逻辑
-                # 获取所有非对角元素（即序列对之间的相似度）
-                for i in range(seq_len):
-                    for j in range(i + 1, seq_len):
-                        similarity_t = cosine_sim_t[i, j].item()
-                        if similarity_t > 0.5 :  # 设定阈值筛选边
-                            edges.append((i, j))  # 保存 (seq1_idx, seq2_idx)
-                edges = torch.tensor(edges, dtype=torch.int, device=torch.device('cuda:0')).T
+        # 3. 重塑特征以适应PyG的输入格式
+        # 将batch和seq维度展平
+        x = distilled_features.reshape(-1, distilled_features.shape[-1])
 
-            if len(edges) == 0:
-                edges = torch.tensor([[0], [1]], dtype=torch.int, device=torch.device('cuda:0')) # 或者返回一个默认的边构建逻辑
+        # 4. 应用GAT层
+        x = self.gat1(x, edges)
+        x = torch.relu(x)
+        x = self.gat2(x, edges)
 
-            edges = torch.tensor(edges, dtype=torch.int, device=torch.device('cuda:0')).T
+        # 5. 重塑回原始维度
+        outputs = x.reshape(batch_size, -1, x.shape[-1])
 
-            x = F.relu(self.gat1(seq_features, edges))
-            outputs.append(x)
-            # x = self.gat2(x, edge_index)
+        return outputs
 
-        outputs = torch.stack(outputs, dim=0)
-        return outputs  # batch seq dim
-
-# class GraphAttentionLayer(nn.Module):
-#     def __init__(self, in_feature, out_feature, dropout, aplha, concat=True):
-#         super(GraphAttentionLayer, self).__init__()
-#         self.in_feature = in_feature
-#         self.out_feature = out_feature
-#         self.dropout = dropout
-#         self.alpha = aplha
-#         self.concat = concat
+# class RoutingMechanism(nn.Module):
+#     def __init__(self, input_dim=2560, hidden_dim=128, output_dim=1, num_heads=4, dropout_rate=0.3):
+#         super(RoutingMechanism, self).__init__()
+#         # 增加多头注意力层
+#         self.attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=num_heads, dropout=dropout_rate)
+#         self.fc1 = nn.Linear(input_dim, hidden_dim)
+#         self.relu = nn.ReLU()
+#         self.dropout = nn.Dropout(dropout_rate)
+#         self.fc2 = nn.Linear(hidden_dim, output_dim)
 #
-#         self.Wlinear = nn.Linear(in_feature, out_feature)
-#         # self.W=nn.Parameter(torch.empty(size=(batch_size,in_feature,out_feature)))
-#         nn.init.xavier_uniform_(self.Wlinear.weight, gain=1.414)
-#
-#         self.aiLinear = nn.Linear(out_feature, 1)
-#         self.ajLinear = nn.Linear(out_feature, 1)
-#         # self.a=nn.Parameter(torch.empty(size=(batch_size,2*out_feature,1)))
-#         nn.init.xavier_uniform_(self.aiLinear.weight, gain=1.414)
-#         nn.init.xavier_uniform_(self.ajLinear.weight, gain=1.414)
-#
-#         self.leakyRelu = nn.LeakyReLU(self.alpha)
-#
-#     def getAttentionE(self, Wh):
-#         # 重点改了这个函数
-#         Wh1 = self.aiLinear(Wh)
-#         Wh2 = self.ajLinear(Wh)
-#         Wh2 = Wh2.view(Wh2.shape[0], Wh2.shape[2], Wh2.shape[1])
-#         # Wh1=torch.bmm(Wh,self.a[:,:self.out_feature,:])    #Wh:size(node,out_feature),a[:out_eature,:]:size(out_feature,1) => Wh1:size(node,1)
-#         # Wh2=torch.bmm(Wh,self.a[:,self.out_feature:,:])    #Wh:size(node,out_feature),a[out_eature:,:]:size(out_feature,1) => Wh2:size(node,1)
-#
-#         e = Wh1 + Wh2  # broadcast add, => e:size(node,node)
-#         return self.leakyRelu(e)
-#
-#     def forward(self, h, adj):
-#         # print(h.shape)
-#         Wh = self.Wlinear(h)
-#         # Wh=torch.bmm(h,self.W)   #h:size(node,in_feature),W:size(in_feature,out_feature) => Wh:size(node,out_feature)
-#         e = self.getAttentionE(Wh)
-#
-#         zero_vec = -1e9 * torch.ones_like(e)
-#         attention = torch.where(adj > 0, e, zero_vec)
-#         attention = F.softmax(attention, dim=2)
-#         attention = F.dropout(attention, self.dropout, training=self.training)
-#         h_hat = torch.bmm(attention,
-#                           Wh)  # attention:size(node,node),Wh:size(node,out_fature) => h_hat:size(node,out_feature)
-#
-#         if self.concat:
-#             return F.elu(h_hat)
-#         else:
-#             return h_hat
-#
-#     def __repr__(self):
-#         return self.__class__.__name__ + ' (' + str(self.in_feature) + '->' + str(self.out_feature) + ')'
-#
-#
-# class GAT(nn.Module):
-#     def __init__(self, in_feature, hidden_feature, out_feature, attention_layers, dropout, alpha):
-#         super(GAT, self).__init__()
-#         self.in_feature = in_feature
-#         self.out_feature = out_feature
-#         self.hidden_feature = hidden_feature
-#         self.dropout = dropout
-#         self.alpha = alpha
-#         self.attention_layers = attention_layers
-#
-#         self.attentions = [GraphAttentionLayer(in_feature, hidden_feature, dropout, alpha, True) for i in
-#                            range(attention_layers)]
-#
-#         for i, attention in enumerate(self.attentions):
-#             self.add_module('attention_{}'.format(i), attention)
-#
-#         self.out_attention = GraphAttentionLayer(attention_layers * hidden_feature, out_feature, dropout, alpha, False)
-#
-#     def forward(self, h, adj):
-#         # print(h)
-#         h = F.dropout(h, self.dropout, training=self.training)
-#
-#         h = torch.cat([attention(h, adj) for attention in self.attentions], dim=2)
-#         h = F.dropout(h, self.dropout, training=self.training)
-#         h = F.elu(self.out_attention(h, adj))
-#         return h
-
-class RoutingMechanism(nn.Module):
-    def __init__(self, input_dim=2560, hidden_dim=128, output_dim=1, num_heads=4, dropout_rate=0.3):
-        super(RoutingMechanism, self).__init__()
-        # 增加多头注意力层
-        self.attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=num_heads, dropout=dropout_rate)
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout_rate)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, context):
-        context, _ = self.attention(context, context, context)
-        context = self.fc1(context)
-        context = self.relu(context)
-        context = self.dropout(context)
-        context = self.fc2(context)
-        return torch.sigmoid(context)  # 输出在0到1之间，用于动态加权
-
+#     def forward(self, context):
+#         context, _ = self.attention(context, context, context)
+#         context = self.fc1(context)
+#         context = self.relu(context)
+#         context = self.dropout(context)
+#         context = self.fc2(context)
+#         return torch.sigmoid(context)  # 输出在0到1之间，用于动态加权
 
 class InformalExpert(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_heads=4, dropout_rate=0.3):
@@ -247,6 +201,78 @@ class FormalExpert(nn.Module):
         x = self.fc2(x)
         return x
 
+class SceneConfidencePredictor(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(SceneConfidencePredictor, self).__init__()
+        self.predictor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.predictor(x)
+
+class SceneAdaptiveRouter(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(SceneAdaptiveRouter, self).__init__()
+        # 内部置信度预测器 - 类似Mono-Confidence
+        self.formal_confidence = SceneConfidencePredictor(input_dim, hidden_dim)
+        self.informal_confidence = SceneConfidencePredictor(input_dim, hidden_dim)
+
+        # 场景分类器 - 用于计算场景分布
+        self.scene_classifier = nn.Linear(input_dim, 2)
+
+    def compute_distribution_uniformity(self, logits):
+        probs = F.softmax(logits, dim=-1)
+        mean_prob = 1.0 / probs.size(-1)
+        return torch.mean(torch.abs(probs - mean_prob), dim=-1, keepdim=True)
+
+    def forward(self, context):
+        # 1. 计算场景内部置信度
+        formal_conf = self.formal_confidence(context)
+        informal_conf = self.informal_confidence(context)
+
+        # 2. 计算场景分布一致性
+        scene_logits = self.scene_classifier(context)
+        formal_du = self.compute_distribution_uniformity(scene_logits)
+        informal_du = 1 - formal_du  # 简化处理，两个场景分布一致性互补
+
+        # 3. 计算场景置信度 (Co-Belief)
+        formal_belief = formal_conf
+        informal_belief = informal_conf
+
+        # 4. 相对校准
+        scene_rc = formal_du / (informal_du + 1e-8)
+        k_formal = torch.where(
+            formal_du < informal_du,
+            scene_rc,
+            torch.ones_like(scene_rc)
+        )
+        k_informal = torch.where(
+            informal_du < formal_du,
+            1 / scene_rc,
+            torch.ones_like(scene_rc)
+        )
+
+        # 5. 最终的场景权重
+        formal_weight = formal_belief * k_formal
+        informal_weight = informal_belief * k_informal
+
+        # 6. 归一化权重
+        total_weight = formal_weight + informal_weight
+        formal_weight = formal_weight / total_weight
+
+        return formal_weight, {
+            'formal_conf': formal_conf,
+            'informal_conf': informal_conf,
+            'formal_du': formal_du,
+            'informal_du': informal_du,
+            'formal_weight': formal_weight,
+            'informal_weight': informal_weight
+        }
 
 class MultimodalSentimentModel(nn.Module):
     def __init__(self, hidden_dim, output_dim):
@@ -271,15 +297,14 @@ class MultimodalSentimentModel(nn.Module):
         self.dynamic_distiller = DynamicGraphDistiller(self.shared_dims, output_dim=128)  # 蒸馏后的输出维度为 128
 
         # 图卷积模型
-        self.gat_model = GATModel(input_dim=128, hidden_dim=hidden_dim, output_dim=128, num_heads=4)
+        self.gat_model = GATModelWithKL(self.private_dims, input_dim=128, hidden_dim=hidden_dim, output_dim=128, num_heads=4)
 
-        # 路由机制
-        self.router = RoutingMechanism(sum(self.feature_dims), 128, 1)  # 输入为拼接后的上下文
+        # 替换原来的router
+        self.scene_router = SceneAdaptiveRouter(sum(self.feature_dims), hidden_dim)
 
         # 正式与非正式专家模型
         self.informal_expert = InformalExpert(128, hidden_dim, output_dim)
         self.formal_expert = FormalExpert(128, hidden_dim, output_dim)
-
 
     def forward(self, inputs, context):
         """
@@ -293,29 +318,21 @@ class MultimodalSentimentModel(nn.Module):
         # 1. 特征解耦
         shared_features, private_features = self.feature_decoupler(inputs)
 
-        # 2. 融合模态无关特征
-        distilled_features = self.dynamic_distiller(shared_features)  # 形状 (batch_size, seq_len, 128)
+        # 融合模态无关特征
+        distilled_features = self.dynamic_distiller(shared_features)
 
-        # 3. 图注意力卷积进行信息聚合
+        # 图注意力卷积
         output = self.gat_model(distilled_features, private_features)
 
-        # 4. 路由器决策
-        route_decision = self.router(context)  # 形状 (batch_size, seq_len, 1)
-
+        # 场景自适应路由
+        route_weight, confidences = self.scene_router(context)
         # 5. 专家模型预测
         output_formal = self.formal_expert(output)  # 形状 (batch_size, seq_len, output_dim)
         output_informal = self.informal_expert(output)  # 形状 (batch_size, seq_len, output_dim)
 
-        # 7. 动态加权融合
-        output = route_decision * output_formal + (1 - route_decision) * output_informal
+        # 基于置信度的动态融合
+        output = route_weight * output_formal + (1 - route_weight) * output_informal
 
-        return output, route_decision, shared_features, private_features, distilled_features
+        return output, route_weight, shared_features, private_features, distilled_features
 
-
-
-    # def set_requires_grad(self, layer_names, requires_grad):
-    #     # 添加冻结/解冻方法，支持逐层解冻
-    #     for name, param in self.named_parameters():
-    #         if any(layer in name for layer in layer_names):
-    #             param.requires_grad = requires_grad
 
