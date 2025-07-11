@@ -59,16 +59,17 @@ class GaussianDistribution(nn.Module):
         return mean, log_var
 
 class GATModelWithKL(nn.Module):
-    def __init__(self, private_dims, input_dim, hidden_dim, output_dim, num_heads=4, kl_threshold=0.5):
+    def __init__(self, private_dims,ablation, input_dim, hidden_dim, output_dim, num_heads=4, kl_threshold=0.5, dropout=0.3):
         super(GATModelWithKL, self).__init__()
         # 对私有特征进行高斯分布建模
         self.gaussian = nn.ModuleList([
             GaussianDistribution(private_dim) for private_dim in private_dims
         ])
         # 使用多头注意力机制
-        self.gat1 = GATConv(input_dim, hidden_dim, heads=num_heads, dropout=0.3)
-        self.gat2 = GATConv(hidden_dim * num_heads, output_dim, heads=1, dropout=0.3)
+        self.gat1 = GATConv(input_dim, hidden_dim, heads=num_heads, dropout=dropout)
+        self.gat2 = GATConv(hidden_dim * num_heads, output_dim, heads=1, dropout=dropout)
         self.kl_threshold = kl_threshold
+        self.ablation = ablation
 
     @staticmethod
     def kl_divergence(mean_p, log_var_p, mean_q, log_var_q):
@@ -84,30 +85,54 @@ class GATModelWithKL(nn.Module):
         batch_edges = []
         device = private_means[0].device  # 获取设备信息
         for b in range(batch_size):
-            # 获取当前batch的分布参数
-            batch_means = [means[b] for means in private_means]
-            batch_log_vars = [log_vars[b] for log_vars in private_log_vars]
+            if self.ablation == 'graph': # 消融实验：去掉kl散度构建图
+                batch_edges = [[i, i] for i in range(batch_size * len(private_means))]
+            else:
+                # 获取当前batch的分布参数
+                batch_means = [means[b] for means in private_means]
+                batch_log_vars = [log_vars[b] for log_vars in private_log_vars]
 
-            # 计算所有模态对之间的KL散度
-            for i in range(len(batch_means)):
-                for j in range(i + 1, len(batch_means)):
-                    kl_ij = self.kl_divergence(
-                        batch_means[i], batch_log_vars[i],
-                        batch_means[j], batch_log_vars[j]
-                    )
+                # 计算所有模态对之间的KL散度
+                for i in range(len(batch_means)):
+                    for j in range(i + 1, len(batch_means)):
+                        kl_ij = self.kl_divergence(
+                            batch_means[i], batch_log_vars[i],
+                            batch_means[j], batch_log_vars[j]
+                        )
 
-                    if torch.mean(kl_ij) > self.kl_threshold:
-                        # 为当前batch添加边，需要考虑batch中的节点偏移
-                        offset = b * len(private_means)
-                        batch_edges.extend([
-                            [i + offset, j + offset],
-                            [j + offset, i + offset]  # 添加双向边
-                        ])
+                        if torch.mean(kl_ij) > self.kl_threshold:
+                            # 为当前batch添加边，需要考虑batch中的节点偏移
+                            offset = b * len(private_means)
+                            batch_edges.extend([
+                                [i + offset, j + offset],
+                                [j + offset, i + offset]  # 添加双向边
+                            ])
+        # if not batch_edges:  # 如果没有边，添加自环
+        #     batch_edges = [[i, i] for i in range(batch_size * len(private_means))]
+        # else:
+        #     # 过滤超界索引
+        #     valid_mask = (batch_edges >= 0) & (batch_edges < batch_size * len(private_means))
+        #     batch_edges = batch_edges[:, valid_mask.all(dim=0)]  # 只保留合法的边
+        #
+        # return torch.tensor(batch_edges, dtype=torch.long,device=device).t()
+        if batch_edges:
+            edges = torch.tensor(batch_edges, dtype=torch.long, device=device).t()
 
-        if not batch_edges:  # 如果没有边，添加自环
-            batch_edges = [[i, i] for i in range(batch_size * len(private_means))]
+            # **过滤掉超界索引**
+            max_index = batch_size * len(private_means) - 1  # 最大合法索引
+            valid_mask = (edges >= 0) & (edges <= max_index)
+            edges = edges[:, valid_mask.all(dim=0)]  # 只保留合法的边
 
-        return torch.tensor(batch_edges, dtype=torch.long,device=device).t()
+            if edges.numel() == 0:
+                print(f"⚠️ 所有边都被过滤了，自动添加自环！")
+                edges = torch.tensor([[i, i] for i in range(batch_size * len(private_means))], dtype=torch.long,
+                                     device=device).t()
+
+            return edges
+        else:
+            # 如果完全没有边，也要加自环
+            return torch.tensor([[i, i] for i in range(batch_size * len(private_means))], dtype=torch.long,
+                                device=device).t()
 
     def forward(self, distilled_features, private_features):
         """
@@ -133,6 +158,21 @@ class GATModelWithKL(nn.Module):
 
         # 2. 构建图结构
         edges = self.construct_graph(private_means, private_log_vars, batch_size)
+        # 关键检查：确保 edges 不会超界
+        # 这里先计算 num_nodes = batch_size * seq_len**
+        num_nodes = batch_size * distilled_features.shape[1]
+        max_index = num_nodes - 1
+
+        # 4. 检查 edges 是否超界
+        if edges.numel() > 0:
+            current_max = edges.max().item()
+            if current_max > max_index:
+                print(f"❌ edge_index 超界！最大索引: {current_max}, 节点总数={num_nodes}")
+                print(f"❌ edges 形状: {edges.shape}, 取值示例: {edges[:, :10]}")
+                # 可以再打印一下 batch_size, seq_len
+                print(f"batch_size={batch_size}, seq_len={distilled_features.shape[1]}, feat_dim={distilled_features.shape[1]}")
+                raise RuntimeError("edge_index 超界，训练终止！")
+
 
         # 3. 重塑特征以适应PyG的输入格式
         # 将batch和seq维度展平
@@ -275,7 +315,7 @@ class SceneAdaptiveRouter(nn.Module):
         }
 
 class MultimodalSentimentModel(nn.Module):
-    def __init__(self, hidden_dim, output_dim):
+    def __init__(self, hidden_dim, output_dim, ablation, num_heads=4, kl_threshold=0.5, dropout=0.3):
         """
         多模态情感分析模型。
         参数:
@@ -289,16 +329,24 @@ class MultimodalSentimentModel(nn.Module):
         self.feature_dims = [512, 1024, 1024]  # 每个模态的输入维度
         self.shared_dims = [128, 128, 128]  # 模态无关特征维度
         self.private_dims = [128, 128, 128]  # 模态特有特征维度
-
+        self.ablation = ablation # 是否是消融实验
         # 特征解耦模块
         self.feature_decoupler = FeatureDecoupler(self.feature_dims, self.shared_dims, self.private_dims)
 
         # 动态融合模块
         self.dynamic_distiller = DynamicGraphDistiller(self.shared_dims, output_dim=128)  # 蒸馏后的输出维度为 128
 
-        # 图卷积模型
-        self.gat_model = GATModelWithKL(self.private_dims, input_dim=128, hidden_dim=hidden_dim, output_dim=128, num_heads=4)
-
+        # GAT 模型，传入命令行参数
+        self.gat_model = GATModelWithKL(
+            self.private_dims,
+            self.ablation,
+            input_dim=128,
+            hidden_dim=hidden_dim,
+            output_dim=128,
+            num_heads=num_heads,
+            kl_threshold=kl_threshold,
+            dropout=dropout
+        )
         # 替换原来的router
         self.scene_router = SceneAdaptiveRouter(sum(self.feature_dims), hidden_dim)
 
@@ -331,7 +379,10 @@ class MultimodalSentimentModel(nn.Module):
         output_informal = self.informal_expert(output)  # 形状 (batch_size, seq_len, output_dim)
 
         # 基于置信度的动态融合
-        output = route_weight * output_formal + (1 - route_weight) * output_informal
+        if self.ablation == 'router':
+            output = 0.5 * output_formal + 0.5 * output_informal
+        else :
+            output = route_weight * output_formal + (1 - route_weight) * output_informal
 
         return output, route_weight, shared_features, private_features, distilled_features
 

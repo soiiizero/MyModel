@@ -1,3 +1,6 @@
 /gcnet_original/
 /dataset/
-
+/save
+/graph/
+check_data_type.py
+detect.py
