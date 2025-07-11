@@ -1,4 +1,3 @@
-# *_*coding:utf-8 *_*
 import os
 import sys
 import socket
@@ -18,44 +17,30 @@ def get_host_ip():
 DATA_DIR = {
 	'CMUMOSI': '../dataset/CMUMOSI',   # for nlpr
 	'CMUMOSEI': '../dataset/CMUMOSEI',# for nlpr
-	'IEMOCAPSix': '../dataset/IEMOCAP', # for nlpr
-	'IEMOCAPFour': '../dataset/IEMOCAP', # for nlpr
 }
 PATH_TO_RAW_AUDIO = {
 	'CMUMOSI': os.path.join(DATA_DIR['CMUMOSI'], 'subaudio'),
 	'CMUMOSEI': os.path.join(DATA_DIR['CMUMOSEI'], 'subaudio'),
-	'IEMOCAPSix': os.path.join(DATA_DIR['IEMOCAPSix'], 'subaudio'),
-	'IEMOCAPFour': os.path.join(DATA_DIR['IEMOCAPFour'], 'subaudio'),
 }
 PATH_TO_RAW_FACE = {
 	'CMUMOSI': os.path.join(DATA_DIR['CMUMOSI'], 'openface_face'),
 	'CMUMOSEI': os.path.join(DATA_DIR['CMUMOSEI'], 'openface_face'),
-	'IEMOCAPSix': os.path.join(DATA_DIR['IEMOCAPSix'], 'subvideofaces'), # without openfac
-	'IEMOCAPFour': os.path.join(DATA_DIR['IEMOCAPFour'], 'subvideofaces'),
 }
 PATH_TO_TRANSCRIPTIONS = {
 	'CMUMOSI': os.path.join(DATA_DIR['CMUMOSI'], 'transcription.csv'),
 	'CMUMOSEI': os.path.join(DATA_DIR['CMUMOSEI'], 'transcription.csv'),
-	'IEMOCAPSix': os.path.join(DATA_DIR['IEMOCAPSix'], 'transcription.csv'),
-	'IEMOCAPFour': os.path.join(DATA_DIR['IEMOCAPFour'], 'transcription.csv'),
 }
 PATH_TO_FEATURES = {
 	'CMUMOSI': os.path.join(DATA_DIR['CMUMOSI'], 'features'),
 	'CMUMOSEI': os.path.join(DATA_DIR['CMUMOSEI'], 'features'),
-	'IEMOCAPSix': os.path.join(DATA_DIR['IEMOCAPSix'], 'features'),
-	'IEMOCAPFour': os.path.join(DATA_DIR['IEMOCAPFour'], 'features'),
 }
 PATH_TO_LABEL = {
 	'CMUMOSI': os.path.join(DATA_DIR['CMUMOSI'], 'CMUMOSI_features_raw_2way.pkl'),
 	'CMUMOSEI': os.path.join(DATA_DIR['CMUMOSEI'], 'CMUMOSEI_features_raw_2way.pkl'),
-	'IEMOCAPSix': os.path.join(DATA_DIR['IEMOCAPSix'], 'IEMOCAP_features_raw_6way.pkl'),
-	'IEMOCAPFour': os.path.join(DATA_DIR['IEMOCAPFour'], 'IEMOCAP_features_raw_4way.pkl'),
 }
 
 # pre-trained models, including supervised and unsupervised
 PATH_TO_PRETRAINED_MODELS = '../tools'
-PATH_TO_OPENSMILE = '../tools/opensmile-2.3.0/'
-PATH_TO_FFMPEG = '../tools/ffmpeg-4.4.1-i686-static/ffmpeg'
 
 # dir
 SAVED_ROOT = os.path.join('../saved')
@@ -93,6 +78,4 @@ PATH_TO_FEATURES_Win = {
 	'CMUMOSEI5': os.path.join(DATA_DIR_Win['CMUMOSEI5'], 'features'),
 }
 
-PATH_TO_OPENFACE_Win = "H:\\desktop\\Multimedia-Transformer\\gcnet-master\\OpenFace_2.2.0_win_x64\\OpenFace_2.2.0_win_x64"
-PATH_TO_FFMPEG_Win = "H:\\desktop\\Multimedia-Transformer\\tools\\ffmpeg-3.4.1-win32-static\\bin\\ffmpeg"
 
